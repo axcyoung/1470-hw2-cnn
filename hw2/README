@@ -1,1 +1,3 @@
 README CNN_CIFAR
+Accuracy with tf.nn.conv2d is 0.7319336
+Accuracy with conv2d is 0.6796875
