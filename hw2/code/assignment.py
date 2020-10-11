@@ -19,13 +19,18 @@ class Model(tf.keras.Model):
         """
         super(Model, self).__init__()
 
-        self.batch_size = None
-        self.num_classes = None
+        self.batch_size = 64
+        self.num_classes = 2
         self.loss_list = [] # Append losses to this list in training so you can visualize loss vs time in main
+        self.learning_rate = .001
+        self.dropout_rate = .3
+        self.var_ep = .000001
 
-        # TODO: Initialize all hyperparameters
-
-        # TODO: Initialize all trainable parameters
+        self.filter1 = tf.Variable(tf.random.truncated_normal([5,5,3,16], stddev=.1, dtype=tf.float32))
+        self.filter2 = tf.Variable(tf.random.truncated_normal([5,5,16,20], stddev=.1, dtype=tf.float32))
+        self.filter3 = tf.Variable(tf.random.truncated_normal([3,3,20,20], stddev=.1, dtype=tf.float32))
+        self.W1 = tf.Variable(tf.random.truncated_normal([2*2*20, 2], stddev=.1, dtype=tf.float32))
+        self.b1 = tf.Variable(tf.random.truncated_normal([2], stddev=.1, dtype=tf.float32))
 
     def call(self, inputs, is_testing=False):
         """
@@ -39,7 +44,34 @@ class Model(tf.keras.Model):
         # shape of filter = (filter_height, filter_width, in_channels, out_channels)
         # shape of strides = (batch_stride, height_stride, width_stride, channels_stride)
 
-        pass
+        layer1Output = tf.nn.conv2d(inputs, self.filter1, strides=[2,2], padding='SAME')
+        meanVar1 = tf.nn.moments(layer1Output, axes=[0, 1, 2])
+        layer1Output = tf.nn.batch_normalization(layer1Output, meanVar1[0], meanVar1[1], offset=None, scale=None, variance_epsilon=self.var_ep)
+        layer1Output = tf.nn.relu(layer1Output)
+        layer1Output = tf.nn.max_pool(layer1Output, [3,3], [2,2], padding='SAME')
+
+        layer2Output = tf.nn.conv2d(layer1Output, self.filter2, strides=[1,1], padding='SAME')
+        meanVar2 = tf.nn.moments(layer2Output, axes=[0, 1, 2])
+        layer2Output = tf.nn.batch_normalization(layer2Output, meanVar2[0], meanVar2[1], offset=None, scale=None, variance_epsilon=self.var_ep)
+        layer2Output = tf.nn.relu(layer2Output)
+        layer2Output = tf.nn.max_pool(layer2Output, [2,2], [2,2], padding='SAME')
+        
+        if is_testing == True:
+            layer3Output = conv2d(layer2Output, self.filter3, strides=[1,1,1,1], padding='SAME')
+            layer3Output = tf.convert_to_tensor(layer3Output)
+        else:
+            layer3Output = tf.nn.conv2d(layer2Output, self.filter3, strides=[1,1,1,1], padding='SAME')
+        meanVar3 = tf.nn.moments(layer3Output, axes=[0, 1, 2])
+        layer3Output = tf.nn.batch_normalization(layer3Output, meanVar3[0], meanVar3[1], offset=None, scale=None, variance_epsilon=self.var_ep)
+        layer3Output = tf.nn.relu(layer3Output)
+        layer3Output = tf.nn.max_pool(layer3Output, 2, 2, padding='SAME')
+
+        layer4Output = tf.nn.dropout(layer3Output, self.dropout_rate)
+        layer4Output = tf.reshape(layer4Output, [layer4Output.shape[0], -1])
+    
+        logits = tf.matmul(layer4Output, self.W1) + self.b1
+
+        return logits
 
     def loss(self, logits, labels):
         """
@@ -49,9 +81,8 @@ class Model(tf.keras.Model):
         Softmax is applied in this function.
         :param labels: during training, matrix of shape (batch_size, self.num_classes) containing the train labels
         :return: the loss of the model as a Tensor
-        """
-
-        pass
+        """ 
+        return tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels, logits))
 
     def accuracy(self, logits, labels):
         """
@@ -81,8 +112,29 @@ def train(model, train_inputs, train_labels):
     shape (num_labels, num_classes)
     :return: Optionally list of losses per batch to use for visualize_loss
     '''
+    num_examples = train_labels.shape.as_list()[0]
+    shuffle_indices = np.arange(0, num_examples)
+    shuffle_indices = tf.random.shuffle(shuffle_indices)
+    train_inputs = tf.gather(train_inputs, shuffle_indices)
+    train_labels = tf.gather(train_labels, shuffle_indices)
 
-    pass
+    optimizer = tf.keras.optimizers.Adam(model.learning_rate)
+
+    for i in range(0, num_examples, model.batch_size):
+        input_batch = train_inputs[i:i + model.batch_size, :, :, :]
+        input_batch = tf.image.random_flip_left_right(input_batch)
+        
+        label_batch = train_labels[i:i + model.batch_size]
+        
+        with tf.GradientTape() as tape:
+            logits = model.call(input_batch)
+            loss = model.loss(logits, label_batch)
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        model.loss_list.append(loss)
+        #print(model.accuracy(logits, label_batch))
+        
 
 def test(model, test_inputs, test_labels):
     """
@@ -95,9 +147,16 @@ def test(model, test_inputs, test_labels):
     :return: test accuracy - this should be the average accuracy across
     all batches
     """
-
-    pass
-
+    accuracies = []
+    for i in range(0, test_labels.shape.as_list()[0], model.batch_size):
+        input_batch = test_inputs[i:i + model.batch_size, :, :, :]
+        
+        label_batch = test_labels[i:i + model.batch_size]
+        
+        logits = model.call(input_batch, True)
+        accuracies.append(model.accuracy(logits, label_batch))
+    return np.mean(np.array(accuracies))
+    
 
 def visualize_loss(losses): 
     """
@@ -180,7 +239,20 @@ def main():
     
     :return: None
     '''
-
+    training = get_data('data/train', 3, 5)
+    train_inputs = training[0]
+    train_labels = training[1]
+    
+    testing = get_data('data/test', 3, 5)
+    test_inputs = testing[0]
+    test_labels = testing[1]
+    
+    m = Model()
+    for i in range(10):
+        train(m, train_inputs, train_labels)
+        
+    print(test(m, test_inputs, test_labels))
+    visualize_loss(m.loss_list)
     return
 
 
